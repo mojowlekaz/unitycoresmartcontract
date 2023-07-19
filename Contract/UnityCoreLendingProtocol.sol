@@ -17,6 +17,7 @@ contract LendingPoolToken is ERC20 {
     }
 }
 
+
 contract UnityCoreLendingProtocol is ReentrancyGuard {
     constructor(
         address _lendingToken,
@@ -243,6 +244,7 @@ uint256 borrowingLimitPercentage = 80;
         emit usdtDeposited(msg.sender, amount);
     }
 
+    //activate users collatera
 function activateCollateral(uint8 collateral) external {
     CollateralType selected = CollateralType(collateral);
 
