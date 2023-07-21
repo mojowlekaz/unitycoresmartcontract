@@ -385,7 +385,10 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
                 address(this).balance > amount,
                 "Not enough ETH in the contract"
             );
-            payable(msg.sender).transfer(amount);
+            (bool success, ) = payable(msg.sender).call{value: amount}("");
+            if (!success) {
+                revert("Transfer failed");
+            }
             userBalances[msg.sender].coreborrowBalance += amount;
             TotalCoreBorrowed += amount;
             bool alreadyInArray = false;
@@ -465,7 +468,10 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
                 "Not enough ETH in the contract"
             );
 
-            payable(msg.sender).transfer(amount);
+            (bool success, ) = payable(msg.sender).call{value: amount}("");
+            if (!success) {
+                revert("Transfer failed");
+            }
             userBalances[msg.sender].coreborrowBalance += amount;
             TotalCoreBorrowed += amount;
 
@@ -527,7 +533,10 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
                 address(this).balance > amount,
                 "Not enough ETH in the contract"
             );
-            payable(msg.sender).transfer(amount);
+            (bool success, ) = payable(msg.sender).call{value: amount}("");
+            if (!success) {
+                revert("Transfer failed");
+            }
             userBalances[msg.sender].coreborrowBalance += amount;
             // Check if msg.sender is already in the borrowers array
             bool alreadyInArray = false;
@@ -1155,35 +1164,45 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
             revert("Exceeded amount in the balance");
         }
 
-            require(
-                address(this).balance > amount,
-                "Not enough ETH in the contract"
-            );
+        require(
+            address(this).balance > amount,
+            "Not enough ETH in the contract"
+        );
 
+        if (userBalances[msg.sender].depositFrozen = true) {
+            revert("you already used this asset as your collateral");
+        }
 
-if(  userBalances[msg.sender].depositFrozen = true){
-    revert("you already used this asset as your collateral");
-}
-
-            if (
-                userBalances[msg.sender].coreborrowBalance > 0
-            ) // Check if the user has any outstanding debt (borrowed amounts)
-            {
-                revert("Please repay your debt before withdrawing");
-            }
-
-
+        if (
+            userBalances[msg.sender].coreborrowBalance > 0
+        ) // Check if the user has any outstanding debt (borrowed amounts)
+        {
+            revert("Please repay your debt before withdrawing");
+        }
 
         // Check if the user's deposit is frozen (liquidated)
         if (userBalances[msg.sender].isDepositFrozen) {
-            // Withdraw the remaining balance
-            uint256 remainingBalance = userBalances[msg.sender].coreBalance;
+            // Calculate the fee amount (4.5% of the core balance)
+            uint256 feeAmount = userBalances[msg.sender]
+                .coreBalance
+                .mul(45)
+                .div(1000);
+
+            // Calculate the remaining balance after deducting the fee
+            uint256 remainingBalance = userBalances[msg.sender].coreBalance.sub(
+                feeAmount
+            );
 
             // Set the balance to zero
             userBalances[msg.sender].coreBalance = 0;
 
             // Transfer the remaining balance to the user's address
-            payable(msg.sender).transfer(remainingBalance);
+            (bool success, ) = payable(msg.sender).call{
+                value: remainingBalance
+            }("");
+            if (!success) {
+                revert("Transfer failed");
+            }
 
             // Emit an event or perform necessary actions
             emit CoreWithdrawn(msg.sender, remainingBalance);
@@ -1191,10 +1210,15 @@ if(  userBalances[msg.sender].depositFrozen = true){
             // Exit the function after the withdrawal is completed
             return;
         }
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) {
+            revert("Transfer failed");
+        }
 
+        userBalances[msg.sender].coreBalance -= amount;
+        lendingToken.burn(msg.sender, amount);
 
-        // Proceed with the withdrawal
-        // ...
+        emit Withdrewdeposit(msg.sender, amount);
     }
 
     receive() external payable {
