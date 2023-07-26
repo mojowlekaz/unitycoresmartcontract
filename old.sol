@@ -31,18 +31,19 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
         lendingToken = LendingPoolToken(_lendingToken);
         priceContract = PriceContract(_priceContractaddress);
         owner = msg.sender;
-        Authorized = msg.sender;
     }
 
-    error Ethers();
-    error IceToken();
-    error Amount();
+    error InsufficientEthers();
+    error InsufficientIceToken();
+    error InsufficientAmount();
 
     struct UserBalance {
+
         //Borrow Blance
         uint256 coreborrowBalance;
         uint256 usdtborrowBalance;
         uint256 usdcborrowBalance;
+    
         bool isDepositFrozen;
         bool COREdepositFrozen;
         bool USDTdepositFrozen;
@@ -53,25 +54,20 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
         uint256 rewardBalancesUSDC;
         CollateralType selectedCollateral;
         bool isCollateralActive;
-         
     }
 
     struct UserCollateralInfo {
-        uint256 depositFromTSofCORE;
-        uint256 depositFromTSofUSDT;
-        uint256 depositFromTSofUSDC;
-        uint256 coreBalance;
-        uint256 usdtBalance;
-        uint256 usdcBalance;
-        bool userHasClaimedRewards;
-        uint256 min_usdt_deposit;
-        uint256 min_usdc_deposit;
-        uint256 minCoredeposit;
-          bool isBorrower;
-        // Add other collateral-related fields as needed
-    }
+    uint256 depositFromTSofCORE;
+    uint256 depositFromTSofUSDT;
+    uint256 depositFromTSofUSDC;
+    uint256 coreBalance;
+    uint256 usdtBalance;
+    uint256 usdcBalance;
+    bool userHasClaimedRewards;
+    // Add other collateral-related fields as needed
+}
 
-    mapping(address => UserCollateralInfo) public userCollateralInfo;
+mapping(address => UserCollateralInfo) userCollateralInfo;
 
     enum CollateralType {
         None,
@@ -98,9 +94,7 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
     uint256 public TotalUSDCBorrowed;
     mapping(address => UserBalance) public userBalances;
     mapping(address => uint256) public depositFromTs;
-    // mapping(address => bool) public isBorrower;
-    mapping(address => uint256) public ucoreClaimableBalance;
-    mapping(address => uint256) public lastClaimTimestamp;
+    mapping(address => bool) isBorrower;
     LendingPoolToken public immutable lendingToken;
     PriceContract public immutable priceContract;
     uint256 public usdtPrice = 1000000;
@@ -108,11 +102,8 @@ contract UnityCoreLendingProtocol is ReentrancyGuard {
     uint256 public core_price = 2e18;
     uint256 public liquidationThreshold = 8750; // Liquidation threshold as a basis points
     address public owner;
-    address public Authorized;
     uint256 borrowingLimitPercentage = 80;
     uint256 public rewardRate; // Reward rate in percentage (e.g., 1000 for 10%)
-address public authorizedContract;
-
 
     event Deposited(address indexed user, uint256 indexed amount);
     event CoreWithdrawn(address indexed user, uint256 indexed amount);
@@ -138,18 +129,6 @@ address public authorizedContract;
         _;
     }
 
-modifier onlyOwnerOrAuthorized() {
-    require(msg.sender == owner || msg.sender == authorizedContract, "Not authorized");
-    _;
-}
-
-
-
-
-function setAuthorizedContract(address _authorizedContract) external onlyOwner {
-    authorizedContract = _authorizedContract;
-}
-
     function ChangeCorePrice(uint256 _newprice) public onlyOwner {
         core_price = _newprice;
     }
@@ -160,7 +139,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
     function depositCore() external payable nonReentrant {
         if (msg.value < minCoredeposit) {
-            revert Ethers();
+            revert InsufficientEthers();
         }
         if (userBalances[msg.sender].COREdepositFrozen == true) {
             revert(
@@ -173,8 +152,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             } else {
                 lendingToken.mint(msg.sender, msg.value.mul(10));
             }
-            userCollateralInfo[msg.sender].depositFromTSofCORE = block
-                .timestamp;
+            userCollateralInfo[msg.sender].depositFromTSofCORE = block.timestamp;
             for (uint256 i = 0; i < depositors.length; i++) {
                 if (depositors[i] != msg.sender) {
                     depositors.push(payable(msg.sender));
@@ -197,7 +175,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             amount
         );
         if (!transferSuccess) {
-            revert("USDC i");
+            revert("USDC transfer failed");
         }
 
         if (amount < min_usdc_deposit) {
@@ -250,7 +228,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             amount
         );
         if (!transferSuccess) {
-            revert("USDT i");
+            revert("USDT transfer failed");
         }
 
         if (amount < min_usdt_deposit) {
@@ -290,6 +268,101 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
         emit usdtDeposited(msg.sender, amount);
     }
 
+    // Function to activate collateral
+    function activateCollateral(uint8 collateral) external {
+        CollateralType selected = CollateralType(collateral);
+
+        if (selected == CollateralType.None) {
+            revert("Invalid collateral type");
+        }
+        if (
+            selected == CollateralType.USDT &&
+            userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit
+        ) {
+            revert("Insufficient USDT balance");
+        }
+        if (
+            selected == CollateralType.USDC &&
+            userCollateralInfo[msg.sender].usdcBalance < min_usdc_deposit
+        ) {
+            revert("Insufficient USDC balance");
+        }
+        if (
+            selected == CollateralType.CORE &&
+            userCollateralInfo[msg.sender].coreBalance < minCoredeposit
+        ) {
+            revert("Insufficient CORE balance");
+        }
+
+        userBalances[msg.sender].selectedCollateral = selected;
+        userBalances[msg.sender].isCollateralActive = true; // Set the collateral as active
+
+        emit CollateralActivated(msg.sender, collateralTypeToString(selected));
+    }
+
+    function deactivateCollateral() external {
+        // Check if the user's collateral is active
+        require(
+            userBalances[msg.sender].isCollateralActive,
+            "Collateral is not active"
+        );
+
+        CollateralType selectedCollateral = userBalances[msg.sender]
+            .selectedCollateral;
+        require(
+            selectedCollateral != CollateralType.None,
+            "No collateral selected"
+        );
+        require(
+            userBalances[msg.sender].coreborrowBalance == 0 &&
+                userBalances[msg.sender].usdtborrowBalance == 0 &&
+                userBalances[msg.sender].usdcborrowBalance == 0,
+            "Cannot deactivate collateral with active loans"
+        );
+
+        // Check if there are any outstanding borrowings for the selected collateral
+        uint256 borrowedAmount = 0;
+        if (selectedCollateral == CollateralType.CORE) {
+            borrowedAmount = userBalances[msg.sender].coreborrowBalance;
+        } else if (selectedCollateral == CollateralType.USDT) {
+            borrowedAmount = userBalances[msg.sender].usdtborrowBalance;
+        } else if (selectedCollateral == CollateralType.USDC) {
+            borrowedAmount = userBalances[msg.sender].usdcborrowBalance;
+        }
+
+        require(
+            borrowedAmount == 0,
+            "Cannot deactivate collateral with outstanding borrowings"
+        );
+
+        // Perform any additional checks specific to the selected collateral (e.g., minimum balance requirements)
+        if (selectedCollateral == CollateralType.CORE) {
+            require(
+                userCollateralInfo[msg.sender].coreBalance >= minCoredeposit,
+                "Insufficient CORE balance"
+            );
+        } else if (selectedCollateral == CollateralType.USDT) {
+            require(
+                userCollateralInfo[msg.sender].usdtBalance >= min_usdt_deposit,
+                "Insufficient USDT balance"
+            );
+        } else if (selectedCollateral == CollateralType.USDC) {
+            require(
+                userCollateralInfo[msg.sender].usdcBalance >= min_usdc_deposit,
+                "Insufficient USDC balance"
+            );
+        }
+
+        userBalances[msg.sender].selectedCollateral = CollateralType.None;
+        // Deactivate the collateral by setting the flag to false
+        userBalances[msg.sender].isCollateralActive = false;
+
+        emit CollateralDeactivated(
+            msg.sender,
+            collateralTypeToString(userBalances[msg.sender].selectedCollateral)
+        );
+    }
+
     function collateralTypeToString(
         CollateralType collateral
     ) internal pure returns (string memory) {
@@ -310,47 +383,24 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             collateralTypeToString(userBalances[msg.sender].selectedCollateral);
     }
 
-    function calculatePrice(
-        uint256 amount
-    )
-        internal
-        view
-        returns (uint256, uint256, uint256, uint256, uint256, uint256)
-    {
-        uint256 usdtBalancePriceOfUser = (userCollateralInfo[msg.sender]
-            .usdtBalance / 1e6) * usdtPrice;
-        uint256 usdcBalancePriceOfUser = (userCollateralInfo[msg.sender]
-            .usdcBalance / 1e6) * usdcPrice;
-        uint256 coreBalancePriceOfUser = (userCollateralInfo[msg.sender]
-            .coreBalance / 1e18) * core_price;
-        uint256 priceOfCoreUserWantToBorrow = amount * (core_price / 1e18);
-        uint256 priceOfUsdcUserWantToBorrow = amount * (usdcPrice / 1e6);
-        uint256 priceOfUsdtUserWantToBorrow = amount * (usdtPrice / 1e6);
+function calculatePrice(uint256 amount) internal view returns (uint256, uint256, uint256, uint256, uint256, uint256) {
+    uint256 usdtBalancePriceOfUser = (userCollateralInfo[msg.sender].usdtBalance / 1e6) * usdtPrice;
+    uint256 usdcBalancePriceOfUser = (userCollateralInfo[msg.sender].usdcBalance / 1e6) * usdcPrice;
+    uint256 coreBalancePriceOfUser = (userCollateralInfo[msg.sender].coreBalance / 1e18) * core_price;
+    uint256 priceOfCoreUserWantToBorrow = amount * (core_price / 1e18);
+    uint256 priceOfUsdcUserWantToBorrow = amount * (usdcPrice / 1e6);
+    uint256 priceOfUsdtUserWantToBorrow = amount * (usdtPrice / 1e6);
 
-        return (
-            usdtBalancePriceOfUser,
-            priceOfUsdcUserWantToBorrow,
-            priceOfUsdtUserWantToBorrow,
-            coreBalancePriceOfUser,
-            usdcBalancePriceOfUser,
-            priceOfCoreUserWantToBorrow
-        );
-    }
+    return (
+        usdtBalancePriceOfUser,
+        priceOfUsdcUserWantToBorrow,
+        priceOfUsdtUserWantToBorrow,
+        coreBalancePriceOfUser,
+        usdcBalancePriceOfUser,
+        priceOfCoreUserWantToBorrow
+    );
+}
 
-    function getUserCollateralBalance(
-        address user,
-        CollateralType collateral
-    ) external view returns (uint256) {
-        if (collateral == CollateralType.CORE) {
-            return userCollateralInfo[user].coreBalance;
-        } else if (collateral == CollateralType.USDT) {
-            return userCollateralInfo[user].usdtBalance;
-        } else if (collateral == CollateralType.USDC) {
-            return userCollateralInfo[user].usdcBalance;
-        } else {
-            revert("l");
-        }
-    }
 
     function borrowCoreBasedOnCollateral(
         uint256 amount
@@ -365,7 +415,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDT"))
         ) {
             if (userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit) {
-                revert(" USDT balance");
+                revert("Insufficient USDT balance");
             }
             amount = msg.value;
             (
@@ -395,13 +445,16 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 !(coreBorrowBalance.add(amount.mul(core_price).div(1e18)) <
                     borrowingLimit)
             ) {
-                revert("s");
+                revert("Invalid borrowing conditions");
             }
             //  uint256 amountToBorrow = amount.mul(80).div(100);
-            require(address(this).balance > amount, "n");
+            require(
+                address(this).balance > amount,
+                "Not enough ETH in the contract"
+            );
             (bool success, ) = payable(msg.sender).call{value: amount}("");
             if (!success) {
-                revert("i");
+                revert("Transfer failed");
             }
             userBalances[msg.sender].coreborrowBalance += amount;
             TotalCoreBorrowed += amount;
@@ -417,7 +470,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-            userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].COREdepositFrozen = true;
             emit coreBorrowed(msg.sender, amount);
         } else if (
@@ -425,7 +478,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDC"))
         ) {
             if (userCollateralInfo[msg.sender].usdcBalance < min_usdc_deposit) {
-                revert(" USDC balance");
+                revert("Insufficient USDC balance");
             }
 
             (
@@ -440,9 +493,9 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             uint256 USDCPrice = usdcPrice.div(1e6);
             uint256 Price = core_price.div(1e18);
 
-            uint256 depositPrice = userCollateralInfo[msg.sender]
-                .usdcBalance
-                .mul(USDCPrice);
+            uint256 depositPrice = userCollateralInfo[msg.sender].usdcBalance.mul(
+                USDCPrice
+            );
 
             // uint256 borrowingLimit = depositPrice.mul(borrowingLimitPercentage).div(100);
             uint256 borrowingLimit = userCollateralInfo[msg.sender]
@@ -464,21 +517,27 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
             // Check if the borrow conditions are met
             // Check if the borrowing conditions are met
-            require(borrowPrice <= borrowingLimit, "l");
+            require(borrowPrice <= borrowingLimit, "Exceeded borrowing limit");
             require(
                 coreBorrowBalancePrice.add(borrowPrice) < borrowingLimit,
-                "d"
+                "you can not borrow more thsn the deposit limit"
             );
             require(
                 coreBorrowBalancePrice.add(borrowPrice) <= depositPrice,
-                "k"
+                "Deposit value is insufficient for borrowing"
             );
-            require(depositPrice > borrowPrice, "m");
-            require(address(this).balance > amount, "n");
+            require(
+                depositPrice > borrowPrice,
+                "Borrowed amount should be less than the core deposit value"
+            );
+            require(
+                address(this).balance > amount,
+                "Not enough ETH in the contract"
+            );
 
             (bool success, ) = payable(msg.sender).call{value: amount}("");
             if (!success) {
-                revert("i");
+                revert("Transfer failed");
             }
             userBalances[msg.sender].coreborrowBalance += amount;
             TotalCoreBorrowed += amount;
@@ -496,7 +555,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].COREdepositFrozen = true;
             emit coreBorrowed(msg.sender, amount);
         } else if (
@@ -504,7 +563,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("CORE"))
         ) {
             if (userCollateralInfo[msg.sender].coreBalance < minCoredeposit) {
-                revert(" CORE balance");
+                revert("Insufficient CORE balance");
             }
 
             uint256 depositPrice = userCollateralInfo[msg.sender]
@@ -529,10 +588,13 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 revert("invalid borrow");
             }
             uint256 amountToBorrow = amount.mul(80).div(100);
-            require(address(this).balance > amount, "n");
+            require(
+                address(this).balance > amount,
+                "Not enough ETH in the contract"
+            );
             (bool success, ) = payable(msg.sender).call{value: amount}("");
             if (!success) {
-                revert("i");
+                revert("Transfer failed");
             }
             userBalances[msg.sender].coreborrowBalance += amount;
             // Check if msg.sender is already in the borrowers array
@@ -547,7 +609,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 if (!alreadyInArray) {
                     borrowers.push(payable(msg.sender));
                 }
-             userCollateralInfo[msg.sender].isBorrower = true;
+                isBorrower[msg.sender] = true;
                 userBalances[msg.sender].COREdepositFrozen = true;
                 TotalCoreBorrowed += amount;
                 emit coreBorrowed(msg.sender, amount);
@@ -569,7 +631,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDT"))
         ) {
             if (userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit) {
-                revert(" USDT balance");
+                revert("Insufficient USDT balance");
             }
 
             (
@@ -603,15 +665,18 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 !(usdtBorrowBalance.add(amount.mul(usdtPrice).div(1e6)) <
                     borrowingLimit)
             ) {
-                revert("s");
+                revert("Invalid borrowing conditions");
             }
 
             // Borrowing conditions met, proceed with the borrow operation
             uint256 amountToBorrow = amount.mul(80).div(100);
-            require(usdtToken.transfer(msg.sender, amount), "USDT i");
+            require(
+                usdtToken.transfer(msg.sender, amount),
+                "USDT transfer failed"
+            );
             require(
                 usdtToken.balanceOf(address(this)) >= amount,
-                "Contract has  USDCT balance"
+                "Contract has insufficient USDCT balance"
             );
             userBalances[msg.sender].usdtborrowBalance += amount;
             TotalUSDTBorrowed += amount;
@@ -627,7 +692,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].USDTdepositFrozen = true;
             emit USDTBorrowed(msg.sender, amount);
         } else if (
@@ -635,7 +700,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDC"))
         ) {
             if (userCollateralInfo[msg.sender].usdcBalance < min_usdc_deposit) {
-                revert(" USDC balance");
+                revert("Insufficient USDC balance");
             }
 
             (
@@ -650,9 +715,9 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             uint256 USDCPrice = usdcPrice.div(1e6);
             uint256 USDTPrice = usdtPrice.div(1e6);
 
-            uint256 depositPrice = userCollateralInfo[msg.sender]
-                .usdcBalance
-                .mul(USDCPrice);
+            uint256 depositPrice = userCollateralInfo[msg.sender].usdcBalance.mul(
+                USDCPrice
+            );
 
             // uint256 borrowingLimit = depositPrice.mul(borrowingLimitPercentage).div(100);
             uint256 borrowingLimit = userCollateralInfo[msg.sender]
@@ -673,23 +738,29 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
             // Check if the borrow conditions are met
             // Check if the borrowing conditions are met
-            require(borrowPrice <= borrowingLimit, "l");
+            require(borrowPrice <= borrowingLimit, "Exceeded borrowing limit");
             require(
                 usdtBorrowBalancePrice.add(borrowPrice) < borrowingLimit,
-                "y"
+                "you can not borrow more than the deposit limit"
             );
             require(
                 usdtBorrowBalancePrice.add(borrowPrice) <= depositPrice,
-                "k"
+                "Deposit value is insufficient for borrowing"
             );
-            require(depositPrice > borrowPrice, "m");
+            require(
+                depositPrice > borrowPrice,
+                "Borrowed amount should be less than the core deposit value"
+            );
             require(
                 usdtToken.balanceOf(address(this)) >= amount,
-                "Contract has  USDCT balance"
+                "Contract has insufficient USDCT balance"
             );
 
             // Proceed with the borrow operation
-            require(usdtToken.transfer(msg.sender, amount), "USDT i");
+            require(
+                usdtToken.transfer(msg.sender, amount),
+                "USDT transfer failed"
+            );
             userBalances[msg.sender].usdtborrowBalance += amount;
             TotalUSDTBorrowed += amount;
 
@@ -707,7 +778,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 borrowers.push(payable(msg.sender));
             }
 
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].USDTdepositFrozen = true;
             emit USDTBorrowed(msg.sender, amount);
         } else if (
@@ -715,7 +786,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("CORE"))
         ) {
             if (userCollateralInfo[msg.sender].coreBalance < minCoredeposit) {
-                revert(" CORE balance");
+                revert("Insufficient CORE balance");
             }
 
             (
@@ -747,24 +818,30 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
             // Check if the borrow conditions are met
             // Check if the borrowing conditions are met
-            require(borrowPrice <= borrowingLimit, "l");
+            require(borrowPrice <= borrowingLimit, "Exceeded borrowing limit");
             require(
                 usdtBorrowBalancePrice.add(borrowPrice) < borrowingLimit,
-                "d"
+                "you can not borrow more thsn the deposit limit"
             );
             require(
                 usdtBorrowBalancePrice.add(borrowPrice) <= depositPrice,
-                "k"
+                "Deposit value is insufficient for borrowing"
             );
-            require(depositPrice > borrowPrice, "m");
+            require(
+                depositPrice > borrowPrice,
+                "Borrowed amount should be less than the core deposit value"
+            );
 
             uint256 amountToBorrow = amount.mul(80).div(100);
             require(
                 usdtToken.balanceOf(address(this)) >= amount,
-                "Contract has  USDT balance"
+                "Contract has insufficient USDT balance"
             );
 
-            require(usdtToken.transfer(msg.sender, amount), "USDT i");
+            require(
+                usdtToken.transfer(msg.sender, amount),
+                "USDT transfer failed"
+            );
             userBalances[msg.sender].usdtborrowBalance += amount;
             TotalUSDTBorrowed += amount;
             // Check if msg.sender is already in the borrowers array
@@ -799,7 +876,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDT"))
         ) {
             if (userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit) {
-                revert(" USDT balance");
+                revert("Insufficient USDT balance");
             }
 
             (
@@ -832,11 +909,14 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
                 !(usdcBorrowBalance.add(amount.mul(usdcPrice).div(1e6)) <
                     borrowingLimit)
             ) {
-                revert("s");
+                revert("Invalid borrowing conditions");
             }
 
             uint256 amountToBorrow = amount.mul(80).div(100);
-            require(usdcToken.transfer(msg.sender, amountToBorrow), "USDC i");
+            require(
+                usdcToken.transfer(msg.sender, amountToBorrow),
+                "USDC transfer failed"
+            );
             userBalances[msg.sender].usdcborrowBalance += amount;
             TotalUSDCBorrowed += amount;
             // Check if msg.sender is already in the borrowers array
@@ -852,7 +932,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].USDCdepositFrozen = true;
             emit USDCBorrowed(msg.sender, amount);
         } else if (
@@ -860,7 +940,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("USDC"))
         ) {
             if (userCollateralInfo[msg.sender].usdcBalance < min_usdc_deposit) {
-                revert(" USDC balance");
+                revert("Insufficient USDC balance");
             }
 
             (
@@ -875,9 +955,9 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             uint256 USDCPrice = usdcPrice.div(1e6);
             //    uint256 Price = core_price.div(1e18);
 
-            uint256 depositPrice = userCollateralInfo[msg.sender]
-                .usdcBalance
-                .mul(USDCPrice);
+            uint256 depositPrice = userCollateralInfo[msg.sender].usdcBalance.mul(
+                USDCPrice
+            );
 
             // uint256 borrowingLimit = depositPrice.mul(borrowingLimitPercentage).div(100);
             uint256 borrowingLimit = userCollateralInfo[msg.sender]
@@ -898,22 +978,28 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
             // Check if the borrow conditions are met
             // Check if the borrowing conditions are met
-            require(borrowPrice <= borrowingLimit, "l");
+            require(borrowPrice <= borrowingLimit, "Exceeded borrowing limit");
             require(
                 usdcBorrowBalancePrice.add(borrowPrice) < borrowingLimit,
-                "d"
+                "you can not borrow more thsn the deposit limit"
             );
             require(
                 usdcBorrowBalancePrice.add(borrowPrice) <= depositPrice,
-                "k"
+                "Deposit value is insufficient for borrowing"
             );
-            require(depositPrice > borrowPrice, "m");
+            require(
+                depositPrice > borrowPrice,
+                "Borrowed amount should be less than the core deposit value"
+            );
             require(
                 usdcToken.balanceOf(address(this)) >= amount,
-                "Contract has  USDC balance"
+                "Contract has insufficient USDC balance"
             );
 
-            require(usdcToken.transfer(msg.sender, amount), "USDC i");
+            require(
+                usdcToken.transfer(msg.sender, amount),
+                "USDC transfer failed"
+            );
             userBalances[msg.sender].usdcborrowBalance += amount;
             TotalUSDCBorrowed += amount;
             // Check if msg.sender is already in the borrowers array
@@ -929,7 +1015,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].USDCdepositFrozen = true;
             emit USDCBorrowed(msg.sender, amount);
         } else if (
@@ -937,7 +1023,7 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             keccak256(bytes("CORE"))
         ) {
             if (userCollateralInfo[msg.sender].coreBalance < minCoredeposit) {
-                revert(" CORE balance");
+                revert("Insufficient CORE balance");
             }
 
             (
@@ -969,23 +1055,29 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
 
             // Check if the borrow conditions are met
             // Check if the borrowing conditions are met
-            require(borrowPrice <= borrowingLimit, "l");
+            require(borrowPrice <= borrowingLimit, "Exceeded borrowing limit");
             require(
                 usdcBorrowBalancePrice.add(borrowPrice) < borrowingLimit,
-                "d"
+                "you can not borrow more thsn the deposit limit"
             );
             require(
                 usdcBorrowBalancePrice.add(borrowPrice) <= depositPrice,
-                "k"
+                "Deposit value is insufficient for borrowing"
             );
-            require(depositPrice > borrowPrice, "m");
+            require(
+                depositPrice > borrowPrice,
+                "Borrowed amount should be less than the core deposit value"
+            );
 
             uint256 amountToBorrow = amount.mul(80).div(100);
             require(
                 usdcToken.balanceOf(address(this)) >= amount,
-                "Contract has  USDC balance"
+                "Contract has insufficient USDC balance"
             );
-            require(usdcToken.transfer(msg.sender, amount), "USDC i");
+            require(
+                usdcToken.transfer(msg.sender, amount),
+                "USDC transfer failed"
+            );
             userBalances[msg.sender].usdcborrowBalance += amount;
             TotalUSDCBorrowed += amount;
             // Check if msg.sender is already in the borrowers array
@@ -1001,41 +1093,75 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             if (!alreadyInArray) {
                 borrowers.push(payable(msg.sender));
             }
-         userCollateralInfo[msg.sender].isBorrower = true;
+            isBorrower[msg.sender] = true;
             userBalances[msg.sender].USDCdepositFrozen = true;
             emit USDCBorrowed(msg.sender, amount);
         }
     }
-    function calculateCollateralValue() public view returns (uint256) {
+
+    function isLiquidated(address user) external view returns (bool) {
+        // uint256 collateralValue = calculateCollateralValue();
+        // uint256 borrowedAmount;
+
+        // Calculate the LTV ratio
+        (
+            uint256 ltvRatio,
+            uint256 borrowedAmount,
+            uint256 collateralValue
+        ) = calculateLTVRatio(user);
+        // Check if the LTV ratio exceeds the liquidation threshold
+        if (ltvRatio > liquidationThreshold) {
+            return true; // User is liquidated
+        }
+
+        return false; // User is not liquidated
+    }
+
+    function calculateLTVRatio(
+        address user
+    ) internal view returns (uint256, uint256, uint256) {
+        // Get the user's selected collateral from the userBalances mapping
+        CollateralType selectedCollateral = userBalances[user]
+            .selectedCollateral;
+        require(
+            selectedCollateral != CollateralType(0),
+            "Collateral not selected"
+        );
+
+        // Determine the borrowed amount and collateral value based on the selected collateral
+        uint256 borrowedAmount;
         uint256 collateralValue;
 
-        if (
-            userBalances[msg.sender].selectedCollateral == CollateralType.USDT
-        ) {
-            uint256 usdtBalance = userCollateralInfo[msg.sender].usdtBalance;
-            collateralValue = usdtBalance.mul(usdtPrice).div(1e6);
-        } else if (
-            userBalances[msg.sender].selectedCollateral == CollateralType.CORE
-        ) {
-            uint256 coreBalance = userCollateralInfo[msg.sender].coreBalance;
-            collateralValue = coreBalance.mul(core_price).div(1e18);
-        } else if (
-            userBalances[msg.sender].selectedCollateral == CollateralType.USDC
-        ) {
-            uint256 usdcBalance = userCollateralInfo[msg.sender].usdcBalance;
-            collateralValue = usdcBalance.mul(usdcPrice).div(1e6);
+        if (selectedCollateral == CollateralType.CORE) {
+            borrowedAmount = userBalances[user].coreborrowBalance;
+            collateralValue =
+                (userCollateralInfo[user].coreBalance * core_price) /
+                1e18;
+        } else if (selectedCollateral == CollateralType.USDT) {
+            borrowedAmount = userBalances[user].usdtborrowBalance;
+            collateralValue =
+                (userCollateralInfo[user].usdtBalance * usdtPrice) /
+                1e6;
+        } else if (selectedCollateral == CollateralType.USDC) {
+            borrowedAmount = userBalances[user].usdcborrowBalance;
+            collateralValue =
+                (userCollateralInfo[user].usdcBalance * usdcPrice) /
+                1e6;
         } else {
             revert("Invalid collateral type");
         }
 
-        return collateralValue;
+        // Calculate the LTV ratio in basis points (multiply by 10000 to convert to basis points)
+        uint256 ltvRatio = (borrowedAmount * 10000) / collateralValue;
+
+        return (ltvRatio, borrowedAmount, collateralValue);
     }
 
     function monitorLiquidationStatus() external {
         for (uint256 i = 0; i < depositors.length; i++) {
             address user = depositors[i];
             // Check if the user is also a borrower
-            if (userCollateralInfo[user].isBorrower) {
+            if (isBorrower[user]) {
                 // Perform liquidation status check for the user
                 uint256 collateralValue = calculateCollateralValue();
                 uint256 borrowedAmount;
@@ -1113,76 +1239,243 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
             }
         }
     }
-    function isLiquidated(address user) external view returns (bool) {
-        // uint256 collateralValue = calculateCollateralValue();
-        // uint256 borrowedAmount;
 
-        // Calculate the LTV ratio
-        (
-            uint256 ltvRatio,
-            uint256 borrowedAmount,
-            uint256 collateralValue
-        ) = calculateLTVRatio(user);
-        // Check if the LTV ratio exceeds the liquidation threshold
-        if (ltvRatio > liquidationThreshold) {
-            return true; // User is liquidated
-        }
-
-        return false; // User is not liquidated
-    }
-
-    function calculateLTVRatio(
-        address user
-    ) internal view returns (uint256, uint256, uint256) {
-        // Get the user's selected collateral from the userBalances mapping
-        CollateralType selectedCollateral = userBalances[user]
-            .selectedCollateral;
-        require(
-            selectedCollateral != CollateralType(0),
-            "Collateral not selected"
-        );
-
-        // Determine the borrowed amount and collateral value based on the selected collateral
-        uint256 borrowedAmount;
+    function calculateCollateralValue() public view returns (uint256) {
         uint256 collateralValue;
 
-        if (selectedCollateral == CollateralType.CORE) {
-            borrowedAmount = userBalances[user].coreborrowBalance;
-            collateralValue =
-                (userCollateralInfo[user].coreBalance * core_price) /
-                1e18;
-        } else if (selectedCollateral == CollateralType.USDT) {
-            borrowedAmount = userBalances[user].usdtborrowBalance;
-            collateralValue =
-                (userCollateralInfo[user].usdtBalance * usdtPrice) /
-                1e6;
-        } else if (selectedCollateral == CollateralType.USDC) {
-            borrowedAmount = userBalances[user].usdcborrowBalance;
-            collateralValue =
-                (userCollateralInfo[user].usdcBalance * usdcPrice) /
-                1e6;
+        if (
+            userBalances[msg.sender].selectedCollateral == CollateralType.USDT
+        ) {
+            uint256 usdtBalance = userCollateralInfo[msg.sender].usdtBalance;
+            collateralValue = usdtBalance.mul(usdtPrice).div(1e6);
+        } else if (
+            userBalances[msg.sender].selectedCollateral == CollateralType.CORE
+        ) {
+            uint256 coreBalance = userCollateralInfo[msg.sender].coreBalance;
+            collateralValue = coreBalance.mul(core_price).div(1e18);
+        } else if (
+            userBalances[msg.sender].selectedCollateral == CollateralType.USDC
+        ) {
+            uint256 usdcBalance = userCollateralInfo[msg.sender].usdcBalance;
+            collateralValue = usdcBalance.mul(usdcPrice).div(1e6);
         } else {
-            revert("l");
+            revert("Invalid collateral type");
         }
 
-        // Calculate the LTV ratio in basis points (multiply by 10000 to convert to basis points)
-        uint256 ltvRatio = (borrowedAmount * 10000) / collateralValue;
-
-        return (ltvRatio, borrowedAmount, collateralValue);
+        return collateralValue;
     }
 
-    function getUserCollateralInfo(
-        address user
-    ) external view returns (UserCollateralInfo memory) {
-        return userCollateralInfo[user];
+    function withdrawCore(uint256 amount) external payable nonReentrant {
+        // Check if user has the minimum required amount of CORE
+        if (userCollateralInfo[msg.sender].coreBalance < minCoredeposit) {
+            revert("Insufficient CORE balance");
+        }
+
+        // Check if the amount to withdraw exceeds the available balance
+        if (amount > userCollateralInfo[msg.sender].coreBalance) {
+            revert("Exceeded amount in the balance");
+        }
+
+        require(
+            address(this).balance > amount,
+            "Not enough ETH in the contract"
+        );
+
+        if (userBalances[msg.sender].COREdepositFrozen == true) {
+            revert("you already used this asset as your collateral");
+        }
+
+        if (
+            userBalances[msg.sender].coreborrowBalance > 0
+        ) // Check if the user has any outstanding debt (borrowed amounts)
+        {
+            revert("Please repay your debt before withdrawing");
+        }
+
+        // Check if the user's deposit is frozen (liquidated)
+        if (userBalances[msg.sender].isDepositFrozen) {
+            // Calculate the fee amount (4.5% of the core balance)
+            uint256 feeAmount = userCollateralInfo[msg.sender]
+                .coreBalance
+                .mul(45)
+                .div(1000);
+
+            // Calculate the remaining balance after deducting the fee
+            uint256 remainingBalance = userCollateralInfo[msg.sender].coreBalance.sub(
+                feeAmount
+            );
+
+            // Set the balance to zero
+            userCollateralInfo[msg.sender].coreBalance = 0;
+
+            // Transfer the remaining balance to the user's address
+            (bool success1, ) = payable(msg.sender).call{
+                value: remainingBalance
+            }("");
+            if (!success1) {
+                revert("Transfer failed");
+            }
+
+            // Emit an event or perform necessary actions
+            emit CoreWithdrawn(msg.sender, remainingBalance);
+
+            // Exit the function after the withdrawal is completed
+            return;
+        }
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) {
+            revert("Transfer failed");
+        }
+
+        userCollateralInfo[msg.sender].coreBalance -= amount;
+        lendingToken.burn(msg.sender, amount);
+
+        emit Withdrewdeposit(msg.sender, amount);
     }
 
     receive() external payable {
         emit Received(msg.sender, msg.value);
     }
 
+    function withdrawUSDT(uint256 amount) external payable nonReentrant {
+        // Check if user has the minimum required amount of USDT
+        if (userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit) {
+            revert("Insufficient USDT balance");
+        }
+
+        // Check if the amount to withdraw exceeds the available balance
+        if (amount > userCollateralInfo[msg.sender].usdtBalance) {
+            revert("Exceeded amount in the balance");
+        }
+        require(
+            usdtToken.balanceOf(address(this)) >= amount,
+            "Contract has insufficient USDT balance"
+        );
+
+        if (userBalances[msg.sender].USDTdepositFrozen == true) {
+            revert("you already used this asset as your collateral");
+        }
+
+        if (
+            userBalances[msg.sender].usdtborrowBalance > 0
+        ) // Check if the user has any outstanding debt (borrowed amounts)
+        {
+            revert("Please repay your debt before withdrawing");
+        }
+
+        // Check if the user's deposit is frozen (liquidated)
+        if (userBalances[msg.sender].isDepositFrozen) {
+            // Calculate the fee amount (4.5% of the core balance)
+            uint256 feeAmount = userCollateralInfo[msg.sender]
+                .usdtBalance
+                .mul(45)
+                .div(1000);
+
+            // Calculate the remaining balance after deducting the fee
+            uint256 remainingBalance = userCollateralInfo[msg.sender].usdtBalance.sub(
+                feeAmount
+            );
+
+            // Set the balance to zero
+            userCollateralInfo[msg.sender].usdtBalance = 0;
+
+            // Transfer the remaining balance to the user's address
+            (bool success2, ) = payable(msg.sender).call{
+                value: remainingBalance
+            }("");
+            if (!success2) {
+                revert("Transfer failed");
+            }
+
+            // Emit an event or perform necessary actions
+            emit USDTWithdrawn(msg.sender, remainingBalance);
+
+            // Exit the function after the withdrawal is completed
+            return;
+        }
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) {
+            revert("Transfer failed");
+        }
+
+        userCollateralInfo[msg.sender].usdtBalance -= amount;
+        lendingToken.burn(msg.sender, amount);
+
+        emit WithdrewUSDT(msg.sender, amount);
+    }
+
+    function withdrawUSDC(uint256 amount) external payable nonReentrant {
+        // Check if user has the minimum required amount of USDT
+        if (userCollateralInfo[msg.sender].usdtBalance < min_usdc_deposit) {
+            revert("Insufficient USDC balance");
+        }
+
+        // Check if the amount to withdraw exceeds the available balance
+        if (amount > userCollateralInfo[msg.sender].usdcBalance) {
+            revert("Exceeded amount in the balance");
+        }
+        require(
+            usdcToken.balanceOf(address(this)) >= amount,
+            "Contract has insufficient USDC balance"
+        );
+
+        if (userBalances[msg.sender].USDCdepositFrozen == true) {
+            revert("you already used this asset as your collateral");
+        }
+
+        if (
+            userBalances[msg.sender].usdcborrowBalance > 0
+        ) // Check if the user has any outstanding debt (borrowed amounts)
+        {
+            revert("Please repay your debt before withdrawing");
+        }
+
+        // Check if the user's deposit is frozen (liquidated)
+        if (userBalances[msg.sender].isDepositFrozen) {
+            // Calculate the fee amount (4.5% of the core balance)
+            uint256 feeAmount = userCollateralInfo[msg.sender]
+                .usdcBalance
+                .mul(45)
+                .div(1000);
+
+            // Calculate the remaining balance after deducting the fee
+            uint256 remainingBalance = userCollateralInfo[msg.sender].usdcBalance.sub(
+                feeAmount
+            );
+
+            // Set the balance to zero
+            userCollateralInfo[msg.sender].usdcBalance = 0;
+
+            // Transfer the remaining balance to the user's address
+            (bool success, ) = payable(msg.sender).call{
+                value: remainingBalance
+            }("");
+            if (!success) {
+                revert("Transfer failed");
+            }
+
+            // Emit an event or perform necessary actions
+            emit USDCWithdrawn(msg.sender, remainingBalance);
+
+            // Exit the function after the withdrawal is completed
+            return;
+        }
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) {
+            revert("Transfer failed");
+        }
+
+        userCollateralInfo[msg.sender].usdcBalance -= amount;
+        lendingToken.burn(msg.sender, amount);
+
+        emit WithdrewUSDC(msg.sender, amount);
+    }
+
     function withdraw(uint256 amount) external onlyOwner {
-        require(amount <= address(this).balance, " contract balance");
+        require(
+            amount <= address(this).balance,
+            "Insufficient contract balance"
+        );
         payable(owner).transfer(amount);
         // emit Withdrawn(owner, amount);
     }
@@ -1191,253 +1484,165 @@ function setAuthorizedContract(address _authorizedContract) external onlyOwner {
         rewardRate = _rewardRate;
     }
 
-    function getMinUSDTDeposit() external view returns (uint256) {
-        return min_usdt_deposit; // Return the state variable value
+    function calculateRewardBasedOnCORE() public view returns (uint256) {
+        uint256 depositTimestamp = userCollateralInfo[msg.sender].depositFromTSofCORE;
+        uint256 currentTimestamp = block.timestamp;
+        uint256 timeDifference = currentTimestamp - depositTimestamp;
+
+        // Calculate the reward based on daily APY
+        uint256 reward = (userCollateralInfo[msg.sender].coreBalance *
+            rewardRate *
+            timeDifference *
+            1e10) / (31540000 * 1e18);
+
+        uint256 rewardToClaim = reward.div(1e8);
+
+        return rewardToClaim;
     }
 
-    function getMinUSDCDeposit() external view returns (uint256) {
-        return min_usdc_deposit;
+    function calculateRewardBasedOnUSDT() public view returns (uint256) {
+        uint256 depositTimestamp = userCollateralInfo[msg.sender].depositFromTSofUSDT;
+        uint256 currentTimestamp = block.timestamp;
+        uint256 timeDifference = currentTimestamp - depositTimestamp;
+
+        // Calculate the reward based on daily APY
+        uint256 reward = (userCollateralInfo[msg.sender].usdtBalance *
+            rewardRate *
+            timeDifference) / (31540000 * 1e6);
+
+        uint256 rewardToClaim = reward.div(1e8);
+
+        return rewardToClaim;
     }
 
-    function getMinCoreDeposit() external view returns (uint256) {
-        return minCoredeposit;
+    function calculateRewardBasedOnUSDC() public view returns (uint256) {
+        uint256 depositTimestamp = userCollateralInfo[msg.sender].depositFromTSofUSDC;
+        uint256 currentTimestamp = block.timestamp;
+        uint256 timeDifference = currentTimestamp - depositTimestamp;
+
+        // Calculate the reward based on daily APY
+        uint256 reward = (userCollateralInfo[msg.sender].usdcBalance *
+            rewardRate *
+            timeDifference) / (31540000 * 1e6);
+
+        uint256 rewardToClaim = reward.div(1e8);
+
+        return rewardToClaim;
     }
 
-    function getUserBalance(
-        address user
-    ) external view returns (UserBalance memory) {
-        return userBalances[user];
-    }
-
-    function getDepositors() external view returns (address[] memory) {
-        return depositors;
-    }
-
-    function getPrices()
-        external
-        view
-        returns (uint256 usdtPrice, uint256 corePrice, uint256 usdcPrice)
-    {
-        return (usdtPrice, core_price, usdcPrice);
-    }
-
-    function getReward() external view returns (uint256) {
-        return rewardRate;
-    }
-
-    function activateCollateral(uint8 collateral) external {
-        CollateralType selected = CollateralType(collateral);
-
-        if (selected == CollateralType.None) {
-            revert("l");
-        }
-        if (
-            selected == CollateralType.USDT &&
-            userCollateralInfo[msg.sender].usdtBalance < min_usdt_deposit
-        ) {
-            revert("USDT balance");
-        }
-        if (
-            selected == CollateralType.USDC &&
-            userCollateralInfo[msg.sender].usdcBalance < min_usdc_deposit
-        ) {
-            revert("USDC balance");
-        }
-        if (
-            selected == CollateralType.CORE &&
-            userCollateralInfo[msg.sender].coreBalance < minCoredeposit
-        ) {
-            revert("CORE balance");
-        }
-
-        userBalances[msg.sender].selectedCollateral = selected;
-        userBalances[msg.sender].isCollateralActive = true; // Set the collateral as active
-
-        emit CollateralActivated(msg.sender, collateralTypeToString(selected));
-    }
-
-    function deactivateCollateral() external {
+    function ClaimCoreReward() external payable nonReentrant {
+        uint256 coreReward = calculateRewardBasedOnCORE();
+        require(coreReward > 0, "No rewards to claim");
         require(
-            userBalances[msg.sender].isCollateralActive,
-            "Collateral is not active"
-        );
-
-        CollateralType selectedCollateral = userBalances[msg.sender]
-            .selectedCollateral;
-        require(
-            selectedCollateral != CollateralType.None,
-            "No collateral selected"
+            !userBalances[msg.sender].userHasClaimedRewards,
+            "Rewards already claimed"
         );
         require(
-            userBalances[msg.sender].coreborrowBalance == 0 &&
-                userBalances[msg.sender].usdtborrowBalance == 0 &&
-                userBalances[msg.sender].usdcborrowBalance == 0,
-            "j"
+            userCollateralInfo[msg.sender].coreBalance > 0,
+            "No CORE deposit found"
+        );
+        // Update the reward balance
+        userBalances[msg.sender].rewardBalancesCORE += coreReward;
+
+        // Transfer the reward tokens to the user
+        require(
+            ucoreToken.transfer(msg.sender, coreReward),
+            "Reward transfer failed"
         );
 
-        // Check if there are any outstanding borrowings for the selected collateral
-        uint256 borrowedAmount = 0;
-        if (selectedCollateral == CollateralType.CORE) {
-            borrowedAmount = userBalances[msg.sender].coreborrowBalance;
-        } else if (selectedCollateral == CollateralType.USDT) {
-            borrowedAmount = userBalances[msg.sender].usdtborrowBalance;
-        } else if (selectedCollateral == CollateralType.USDC) {
-            borrowedAmount = userBalances[msg.sender].usdcborrowBalance;
-        }
-
-        require(borrowedAmount == 0, "C");
-
-        // Perform any additional checks specific to the selected collateral (e.g., minimum balance requirements)
-        if (selectedCollateral == CollateralType.CORE) {
-            require(
-                userCollateralInfo[msg.sender].coreBalance >= minCoredeposit,
-                "CORE balance"
-            );
-        } else if (selectedCollateral == CollateralType.USDT) {
-            require(
-                userCollateralInfo[msg.sender].usdtBalance >= min_usdt_deposit,
-                "USDT balance"
-            );
-        } else if (selectedCollateral == CollateralType.USDC) {
-            require(
-                userCollateralInfo[msg.sender].usdcBalance >= min_usdc_deposit,
-                "USDC balance"
-            );
-        }
-
-        userBalances[msg.sender].selectedCollateral = CollateralType.None;
-        // Deactivate the collateral by setting the flag to false
-        userBalances[msg.sender].isCollateralActive = false;
-
-        if (selectedCollateral == CollateralType.CORE) {
-userBalances[msg.sender].COREdepositFrozen = false;
-        } else if (selectedCollateral == CollateralType.USDT) {
-userBalances[msg.sender].USDTdepositFrozen = false;
-        } else if (selectedCollateral == CollateralType.USDC) {
-userBalances[msg.sender].USDCdepositFrozen = false;
-        }
-
-        emit CollateralDeactivated(
-            msg.sender,
-            collateralTypeToString(userBalances[msg.sender].selectedCollateral)
-        );
+        userCollateralInfo[msg.sender].depositFromTSofCORE = 0;
+        // Mark that the user has claimed rewards
+        userBalances[msg.sender].userHasClaimedRewards = true;
+        emit CorerewardCLiamed(msg.sender, coreReward);
     }
 
-    // Assuming core_price, usdtPrice, and usdcPrice are the prices of CORE, USDT, and USDC tokens in USD, respectively.
-    function calculateBorrowLimitPercentage(
-        address user,
-        CollateralType collateral
-    ) public view returns (uint256) {
-        uint256 borrowedAmountUSD = calculateBorrowedAmountInPrice(
-            user,
-            collateral
+    function ClaimUSDTReward() external payable nonReentrant {
+        uint256 usdtReward = calculateRewardBasedOnUSDT();
+        require(usdtReward > 0, "No rewards to claim");
+        require(
+            !userBalances[msg.sender].userHasClaimedRewards,
+            "Rewards already claimed"
+        );
+        require(
+            userCollateralInfo[msg.sender].usdtBalance > 0,
+            "No   USDT deposit found"
+        );
+        // Update the reward balance
+        userBalances[msg.sender].rewardBalancesUSDT += usdtReward;
+
+        // Transfer the reward tokens to the user
+        require(
+            ucoreToken.transfer(msg.sender, usdtReward),
+            "Reward transfer failed"
         );
 
-        // Calculate the borrow limit percentage for the selected collateral
-        uint256 borrowLimitPercentage;
-        if (borrowedAmountUSD > 0) {
-            borrowLimitPercentage = (borrowedAmountUSD * 100);
-        } else {
-            borrowLimitPercentage = 0;
-        }
-
-        return borrowLimitPercentage;
+        userCollateralInfo[msg.sender].depositFromTSofUSDT = 0;
+        // Mark that the user has claimed rewards
+        userBalances[msg.sender].userHasClaimedRewards = true;
+        emit UsdtrewardCLiamed(msg.sender, usdtReward);
     }
 
-    function calculateBorrowedAmountInPrice(
-        address user,
-        CollateralType collateral
-    ) public view returns (uint256) {
-        // Get the borrowed amount for the selected collateral in USD
-        uint256 borrowedAmountUSD;
+    function ClaimUSDCReward() external payable nonReentrant {
+        uint256 usdcReward = calculateRewardBasedOnUSDC();
+        require(usdcReward > 0, "No rewards to claim");
+        require(
+            !userBalances[msg.sender].userHasClaimedRewards,
+            "Rewards already claimed"
+        );
+        require(
+            userCollateralInfo[msg.sender].usdcBalance > 0,
+            "No USDC deposit found"
+        );
+        // Update the reward balance
+        userBalances[msg.sender].rewardBalancesUSDC += usdcReward;
 
-        if (collateral == CollateralType.CORE) {
-            borrowedAmountUSD =
-                (userBalances[user].coreborrowBalance * core_price) /
-                1e18;
-        } else if (collateral == CollateralType.USDT) {
-            borrowedAmountUSD =
-                (userBalances[user].usdtborrowBalance * usdtPrice) /
-                1e6;
-        } else if (collateral == CollateralType.USDC) {
-            borrowedAmountUSD =
-                (userBalances[user].usdcborrowBalance * usdcPrice) /
-                1e6;
-        } else {
-            revert("l");
-        }
+        // Transfer the reward tokens to the user
+        require(
+            ucoreToken.transfer(msg.sender, usdcReward),
+            "Reward transfer failed"
+        );
 
-        return borrowedAmountUSD;
-    }
-
-    // Function to be called from the WithdrawContract when a user repays
-    // function repayDebtAndUpdateBorrowerStatus(
-    //     address account
-    // ) public    {
-    //     require(msg.sender == address(this));
-    //     // You can add additional checks here if needed
-    //     isBorrower[account] = false;
-    // }
-
-    // Function to transfer ownership of the contract (optional)
-    function transferOwnership(address newOwner) internal onlyOwner {
-        Authorized = newOwner;
-    }
-
-    function updateUserUSDTBalance(
-        address user,
-        uint256 newBalance
-    ) external    {
-     
-        userCollateralInfo[user].usdtBalance = newBalance;
-    }
-
-    function updateUserUSDCBalance(
-        address user,
-        uint256 newBalance
-    ) external    {
-     
-        userCollateralInfo[user].usdcBalance = newBalance;
-    }
-
-    function updateUserCOREBalance(
-        address user,
-        uint256 newBalance
-    ) external    {
-     
-        userCollateralInfo[user].coreBalance = newBalance;
-    }
-
-    function updateUserUSDTBorrowBalance(
-        address user,
-        uint256 newBorrowBalance
-    ) external    {
-     
-        userBalances[user].usdtborrowBalance = newBorrowBalance;
-    }
-
-    function updateUserUSDCBorrowBalance(
-        address user,
-        uint256 newBorrowBalance
-    ) external    {
-     
-        userBalances[user].usdcborrowBalance = newBorrowBalance;
-    }
-
-    function updateUserCOREBorrowBalance(
-        address user,
-        uint256 newBorrowBalance
-    ) external    {
-     
-        userBalances[user].coreborrowBalance = newBorrowBalance;
+        userCollateralInfo[msg.sender].depositFromTSofUSDC = 0;
+        // Mark that the user has claimed rewards
+        userBalances[msg.sender].userHasClaimedRewards = true;
+        emit UsdcrewardCLiamed(msg.sender, usdcReward);
     }
 
 
-    // function updateUserIsBorrow(
-    //     address user,
-    //     uint256 newBorrowBalance
-    // ) external    {
-     
-    //     userBalances[user].coreborrowBalance = newBorrowBalance;
-    // }
+    
+// Assuming core_price, usdtPrice, and usdcPrice are the prices of CORE, USDT, and USDC tokens in USD, respectively.
+function calculateBorrowLimitPercentage(address user, CollateralType collateral) internal view returns (uint256) {
+    uint256 borrowedAmountUSD = calculateBorrowedAmountInPrice(user, collateral);
+   
+
+    // Calculate the borrow limit percentage for the selected collateral
+    uint256 borrowLimitPercentage;
+    if (borrowedAmountUSD > 0) {
+        borrowLimitPercentage = (borrowedAmountUSD * 100);
+    } else {
+        borrowLimitPercentage = 0;
+    }
+
+    return borrowLimitPercentage;
 }
+
+function calculateBorrowedAmountInPrice(address user, CollateralType collateral) internal view returns (uint256) {
+    // Get the borrowed amount for the selected collateral in USD
+    uint256 borrowedAmountUSD;
+
+    if (collateral == CollateralType.CORE) {
+        borrowedAmountUSD = userBalances[user].coreborrowBalance * core_price / 1e18;
+    } else if (collateral == CollateralType.USDT) {
+        borrowedAmountUSD = userBalances[user].usdtborrowBalance * usdtPrice / 1e6;
+    } else if (collateral == CollateralType.USDC) {
+        borrowedAmountUSD = userBalances[user].usdcborrowBalance * usdcPrice / 1e6;
+    } else {
+        revert("Invalid collateral type");
+    }
+
+    return borrowedAmountUSD;
+}
+
+
+}
+
